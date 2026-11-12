@@ -1,0 +1,52 @@
+name: SFERA server release
+
+on:
+  push:
+    tags: ['server-v*']
+  pull_request:
+    paths: ['src/**', 'deploy/**', 'tests/test_selfhost.py', 'Cargo.*', 'rust-toolchain.toml', '.github/workflows/server-release.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: Check installer scripts
+        run: |
+          for script in deploy/selfhost/install.sh deploy/selfhost/package.sh deploy/sfera-test-network.sh; do
+            bash -n "$script"
+          done
+      - run: python3 -m unittest discover -s tests -p 'test_selfhost.py'
+      - run: cargo test --locked signaling_can_restart_after_an_http_connection_closes
+      - run: cargo build --release --locked --bin sfera-net
+      - run: deploy/selfhost/package.sh target/release/sfera-net sfera-server-linux-${{ matrix.arch }}-v1.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sfera-server-linux-${{ matrix.arch }}-v1
+          path: sfera-server-linux-${{ matrix.arch }}-v1.tar.gz
+          if-no-files-found: error
+  publish:
+    if: startsWith(github.ref, 'refs/tags/server-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sfera-server-linux-*
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes --latest sfera-server-linux-*-v1.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}

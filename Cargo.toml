@@ -1,0 +1,44 @@
+[package]
+name = "sfera"
+version = "0.1.0"
+edition = "2024"
+publish = false
+default-run = "sfera"
+description = "Experimental SFERA media transport laboratory"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+getrandom = { version = "0.4", features = ["std"] }
+httparse = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+socket2 = "0.6"
+tun-rs = "=2.8.18"
+str0m = { version = "0.25", default-features = false, features = ["rust-crypto"] }
+subtle = "2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.5", features = ["event", "net"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.31", features = ["socket"] }
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3.5"
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

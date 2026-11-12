@@ -1,0 +1,5 @@
+/target/
+/bindings/mobile/target/
+/artifacts/
+.DS_Store
+__pycache__/
