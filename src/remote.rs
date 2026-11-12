@@ -2569,8 +2569,9 @@ impl Peer {
             if available < MAX_DATA {
                 return Ok(false);
             }
+            let sent = self.stats.camera_cover_packets;
             self.emit_cover(now, MAX_DATA)?;
-            return Ok(true);
+            return Ok(self.stats.camera_cover_packets != sent || !self.native_pending.is_empty());
         }
         let cover_wire_bytes = self.stats.camera_cover_udp_bytes
             + self.stats.camera_cover_packets * IPV4_UDP_OVERHEAD as u64;

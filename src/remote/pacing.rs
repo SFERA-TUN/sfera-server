@@ -155,7 +155,9 @@ impl Pacing {
             }
         } else if !loaded && useful_mbps < 0.80 * self.rate {
             self.rate = (1.15 * useful_mbps).max(MIN_MBPS);
-            self.starting = false;
+            if self.rate < previous && previous > INITIAL_MBPS {
+                self.starting = false;
+            }
             self.clean_epochs = 0;
         } else {
             self.clean_epochs = 0;
@@ -229,6 +231,16 @@ mod tests {
         pacing.observe(now, sample(100, 100, 250));
         // The wire hit 2 Mbps, but only 0.2 Mbps was traffic other than fill.
         assert_eq!(pacing.tick(now, 250_000, 225_000, 0), Some(MIN_MBPS));
+        // A partially utilized first active epoch at the floor does not
+        // disable startup growth on the next full epoch.
+        pacing.backlog(true);
+        assert_eq!(pacing.tick(now + EPOCH, 312_500, 275_000, 0), None);
+        pacing.backlog(true);
+        pacing.observe(now + 2 * EPOCH, sample(20, 20, 250));
+        assert_eq!(
+            pacing.tick(now + 2 * EPOCH, 375_000, 275_000, 0),
+            Some(INITIAL_MBPS)
+        );
     }
 
     #[test]
