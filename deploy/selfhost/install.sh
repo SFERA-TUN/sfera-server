@@ -17,6 +17,9 @@ state=/etc/sfera-selfhost
 
 exec 9>/run/sfera-selfhost-install.lock
 flock -n 9 || { echo "Another SFERA installation is running." >&2; exit 1; }
+[[ ! -e /opt/sfera/.upgrade-recovery ]] || {
+  echo "An interrupted SFERA update needs recovery. Retry the update in the client." >&2; exit 1;
+}
 [[ ! -e /etc/systemd/system/sfera-test.service ]] || { echo "Use a VPS without the experimental SFERA deployment." >&2; exit 1; }
 if [[ -f /etc/sfera-selfhost/public-ip ]]; then
   [[ $(cat /etc/sfera-selfhost/public-ip) == "$ip" ]] || { echo "SFERA is already configured for another IPv4 address." >&2; exit 1; }
@@ -156,3 +159,8 @@ systemctl daemon-reload
 systemctl enable --now sfera-acme.timer >&2
 systemctl enable sfera-selfhost >&2
 /opt/sfera/bin/sferactl apply >/dev/null
+
+if [[ -f server-version && $(cat server-version) != unversioned ]]; then
+  install -m 0644 server-version /opt/sfera/.server-version.new
+  mv -f /opt/sfera/.server-version.new /opt/sfera/server-version
+fi
