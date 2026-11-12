@@ -50,7 +50,8 @@ apt-get -q -o DPkg::Lock::Timeout=60 update >&2
 apt-get -qy -o DPkg::Lock::Timeout=60 install nginx nftables iproute2 python3-venv ca-certificates curl >&2
 python3 -c 'import ipaddress,sys; a=ipaddress.IPv4Address(sys.argv[1]); sys.exit(not a.is_global or a.is_multicast)' "$ip"
 id sfera-selfhost >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin sfera-selfhost
-install -d -m 0755 /opt/sfera/bin /var/www/sfera-acme
+# The service user must be able to traverse the parent even with umask 077.
+install -d -m 0755 /opt/sfera /opt/sfera/bin /var/www/sfera-acme
 install -d -m 0750 -g sfera-selfhost /etc/sfera-selfhost
 printf 'SFERA_IP=%s\n' "$ip" > /etc/sfera-selfhost/server.env
 
