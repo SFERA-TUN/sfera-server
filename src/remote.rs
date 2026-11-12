@@ -1618,6 +1618,17 @@ impl Peer {
         self.stats.adaptive_pacing_mbps = Some(rate);
     }
 
+    fn note_full_tun_queue(&mut self, outgoing: &StagedPackets) {
+        self.stats.tun_stage_full_visits += 1;
+        if let Some(pacing) = &mut self.adaptive_pacing
+            && outgoing
+                .front()
+                .is_some_and(|packet| packet.len() <= pacing::SMALL_PACKET_BYTES)
+        {
+            pacing.note_small_queue_pressure();
+        }
+    }
+
     fn note_backlog(&mut self, backlogged: bool) {
         if let Some(pacing) = &mut self.adaptive_pacing {
             pacing.backlog(backlogged);
@@ -2623,7 +2634,7 @@ impl Peer {
 
     fn send_ip(&mut self, packet: Vec<u8>) -> Result<()> {
         if let Some(pacing) = &mut self.adaptive_pacing {
-            pacing.payload_sent();
+            pacing.payload_sent(packet.len());
         }
         self.data_seq = next_serial(self.data_seq);
         self.stats.tun_tx_packets += 1;
@@ -2866,7 +2877,7 @@ fn run_device(
             if reads > 1 {
                 for _ in 0..reads {
                     if outgoing.is_full() {
-                        peer.stats.tun_stage_full_visits += 1;
+                        peer.note_full_tun_queue(&outgoing);
                         break;
                     }
                     match stage_tun_packet(tun, &mut peer, &mut outgoing, &mut buffer) {

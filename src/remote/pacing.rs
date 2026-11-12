@@ -4,9 +4,11 @@ use super::delivery::matched::Sample;
 use std::time::{Duration, Instant};
 
 const EPOCH: Duration = Duration::from_secs(1);
+const STARTUP_EPOCH: Duration = Duration::from_millis(500);
 const FEEDBACK_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_MBPS: f64 = 2.0;
 const MIN_MBPS: f64 = 0.5;
+pub(super) const SMALL_PACKET_BYTES: usize = 128;
 const RECENT: Duration = Duration::from_secs(30);
 
 pub(super) struct Pacing {
@@ -18,6 +20,9 @@ pub(super) struct Pacing {
     blocked_sends: u64,
     backlogged: bool,
     payload_sent: bool,
+    payload_packets: u64,
+    small_payload_packets: u64,
+    small_queue_full_visits: u32,
     unconfirmed_since: Option<Instant>,
     sent: u64,
     received: u64,
@@ -39,6 +44,9 @@ impl Pacing {
             blocked_sends,
             backlogged: false,
             payload_sent: false,
+            payload_packets: 0,
+            small_payload_packets: 0,
+            small_queue_full_visits: 0,
             unconfirmed_since: None,
             sent: 0,
             received: 0,
@@ -58,8 +66,14 @@ impl Pacing {
         self.backlogged |= backlogged;
     }
 
-    pub(super) fn payload_sent(&mut self) {
+    pub(super) fn payload_sent(&mut self, bytes: usize) {
         self.payload_sent = true;
+        self.payload_packets += 1;
+        self.small_payload_packets += u64::from(bytes <= SMALL_PACKET_BYTES);
+    }
+
+    pub(super) fn note_small_queue_pressure(&mut self) {
+        self.small_queue_full_visits = self.small_queue_full_visits.saturating_add(1);
     }
 
     pub(super) fn observe(&mut self, now: Instant, sample: Sample) {
@@ -93,7 +107,9 @@ impl Pacing {
         blocked_sends: u64,
     ) -> Option<f64> {
         let elapsed = now.saturating_duration_since(self.started);
-        if elapsed < EPOCH {
+        let early_startup =
+            self.starting && self.backlogged && self.sent >= 2 && elapsed >= STARTUP_EPOCH;
+        if elapsed < EPOCH && !early_startup {
             return None;
         }
         let sent = wire_bytes - self.wire_bytes;
@@ -101,7 +117,19 @@ impl Pacing {
         let sent_mbps = sent as f64 * 8e-6 / elapsed.as_secs_f64();
         let useful_mbps = useful as f64 * 8e-6 / elapsed.as_secs_f64();
         let blocked = blocked_sends - self.blocked_sends;
-        let loaded = self.backlogged && useful_mbps >= 0.90 * self.rate;
+        let useful_load = self.backlogged && useful_mbps >= 0.90 * self.rate;
+        if elapsed < EPOCH && !useful_load {
+            return None;
+        }
+        // A persistently full packet queue can signal load in the gap
+        // between the ordinary shrink and growth thresholds.
+        let packet_limited = elapsed >= EPOCH
+            && self.backlogged
+            && self.small_queue_full_visits >= 16
+            && self.payload_packets >= 16
+            && self.small_payload_packets * 20 >= self.payload_packets * 19
+            && (0.80 * self.rate..0.90 * self.rate).contains(&useful_mbps);
+        let loaded = useful_load || packet_limited;
         let missing = self.sent - self.received;
         let loss = missing as f64 / self.sent.max(1) as f64;
         let evidence = self.sent >= 2;
@@ -125,6 +153,7 @@ impl Pacing {
             self.recent_rate = None;
         }
         let lossy = missing >= 2 && loss >= 0.08;
+        let clean_delivery = evidence && loss <= 0.01 && blocked == 0;
         if !self.backlogged && !self.payload_sent {
             self.rate = MIN_MBPS;
             self.clean_epochs = 0;
@@ -138,15 +167,17 @@ impl Pacing {
             self.rate = (self.rate * factor).max(MIN_MBPS);
             self.starting = false;
             self.clean_epochs = 0;
-        } else if loaded && evidence && loss <= 0.01 && blocked == 0 && elapsed < 2 * EPOCH {
+        } else if loaded && clean_delivery && elapsed < 2 * EPOCH {
             let confirmed = self.rate.min(useful_mbps * 1.08);
             if self.recent_rate.is_none_or(|(old, _)| confirmed >= old) {
                 self.recent_rate = Some((confirmed, now));
             }
             self.clean_epochs += 1;
-            if self.starting || self.clean_epochs >= 2 {
+            if (self.starting && useful_load) || self.clean_epochs >= 2 {
                 let recent = self.recent_rate.map_or(0.0, |(rate, _)| rate);
-                self.rate = if self.starting {
+                self.rate = if !useful_load {
+                    1.10 * self.rate
+                } else if self.starting {
                     (1.5 * self.rate).max(INITIAL_MBPS)
                 } else {
                     (1.2 * self.rate).max(recent.min(1.5 * self.rate))
@@ -155,7 +186,12 @@ impl Pacing {
             }
         } else if !loaded && useful_mbps < 0.80 * self.rate {
             self.rate = (1.15 * useful_mbps).max(MIN_MBPS);
-            if self.rate < previous && previous > INITIAL_MBPS {
+            // A short fall in useful traffic can still leave a queued sender
+            // on a clean path. Keep probing in startup after this adjustment.
+            if self.rate < previous
+                && previous > INITIAL_MBPS
+                && !(self.backlogged && clean_delivery)
+            {
                 self.starting = false;
             }
             self.clean_epochs = 0;
@@ -168,6 +204,9 @@ impl Pacing {
         self.blocked_sends = blocked_sends;
         self.backlogged = false;
         self.payload_sent = false;
+        self.payload_packets = 0;
+        self.small_payload_packets = 0;
+        self.small_queue_full_visits = 0;
         self.sent = 0;
         self.received = 0;
         self.epoch_delay = None;
@@ -193,6 +232,73 @@ mod tests {
             send_start_age_ms: age,
             send_end_age_ms: 30,
             forward_delay_offset_ms: Some(0),
+        }
+    }
+
+    #[test]
+    fn startup_uses_an_early_epoch_only_with_measured_load() {
+        let start = Instant::now();
+        let half_second = start + Duration::from_millis(500);
+        for (fill_bytes, expected) in [(0, Some(3.0)), (100_000, None)] {
+            let mut pacing = Pacing::new(start, 0, 0, 0);
+            pacing.backlog(true);
+            assert_eq!(pacing.tick(half_second, 125_000, fill_bytes, 0), None);
+
+            pacing.observe(half_second, sample(10, 10, 200));
+            assert_eq!(pacing.tick(half_second, 125_000, fill_bytes, 0), expected);
+        }
+    }
+
+    #[test]
+    fn queued_small_packets_need_clean_delivery_to_increase_rate() {
+        let start = Instant::now();
+        for (received, visits, bytes, expected) in [
+            (100, 16, 4_250_000, 44.0),
+            (100, 1, 4_250_000, 40.0),
+            (95, 16, 4_250_000, 40.0),
+            (60, 16, 4_250_000, 22.8),
+            (100, 16, 3_250_000, 29.9),
+        ] {
+            let mut pacing = Pacing::new(start, 0, 0, 0);
+            pacing.rate = 40.0;
+            let mut wire = 0;
+            for second in 1..=2 {
+                let now = start + second * EPOCH;
+                pacing.backlog(true);
+                for _ in 0..visits {
+                    pacing.note_small_queue_pressure();
+                }
+                for _ in 0..32 {
+                    pacing.payload_sent(52);
+                }
+                pacing.observe(now, sample(100, received, 200));
+                wire += bytes;
+                pacing.tick(now, wire, 0, 0);
+                if received == 60 || bytes == 3_250_000 {
+                    break;
+                }
+            }
+            assert!((pacing.rate() - expected).abs() < 1e-6, "{}", pacing.rate());
+        }
+    }
+
+    #[test]
+    fn queued_startup_continues_after_clean_underuse() {
+        let start = Instant::now();
+        for (received, expects_startup) in [(100, true), (98, false)] {
+            let mut pacing = Pacing::new(start, 0, 0, 0);
+            pacing.rate = 4.0;
+            let underused = start + EPOCH;
+            pacing.backlog(true);
+            pacing.observe(underused, sample(100, received, 200));
+            assert!(pacing.tick(underused, 250_000, 0, 0).is_some());
+            assert_eq!(pacing.starting, expects_startup);
+
+            let resume = underused + STARTUP_EPOCH;
+            pacing.backlog(true);
+            pacing.observe(resume, sample(100, 100, 200));
+            let new_rate = pacing.tick(resume, 393_750, 0, 0);
+            assert_eq!(new_rate.is_some(), expects_startup);
         }
     }
 
@@ -227,7 +333,7 @@ mod tests {
         let mut pacing = Pacing::new(start, 0, 0, 0);
         let now = start + EPOCH;
         pacing.backlog(true);
-        pacing.payload_sent();
+        pacing.payload_sent(52);
         pacing.observe(now, sample(100, 100, 250));
         // The wire hit 2 Mbps, but only 0.2 Mbps was traffic other than fill.
         assert_eq!(pacing.tick(now, 250_000, 225_000, 0), Some(MIN_MBPS));
@@ -281,7 +387,7 @@ mod tests {
         let before = pacing.rate();
         for second in 5..=7 {
             wire += 375_000;
-            pacing.payload_sent();
+            pacing.payload_sent(52);
             let now = start + second * EPOCH;
             pacing.observe(
                 now,
