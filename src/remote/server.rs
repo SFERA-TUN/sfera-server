@@ -529,7 +529,7 @@ fn service_tun(
     let mut active = flush_incoming(tun, &mut session.peer, identities)?;
     for _ in 0..session.outgoing.reads_per_visit() {
         if session.outgoing.is_full() {
-            session.peer.stats.tun_stage_full_visits += 1;
+            session.peer.note_full_tun_queue(&session.outgoing);
             break;
         }
         match stage_tun_packet(tun, &mut session.peer, &mut session.outgoing, packet) {
