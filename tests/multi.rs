@@ -93,6 +93,8 @@ fn twenty_sessions_deliver_bulk_and_real_control_echoes() -> anyhow::Result<()> 
         &MultiOptions {
             clients: 20,
             interactive_last: true,
+            // Keep sampling 100 ms probes even when the bulk transfer is short.
+            min_duration: Duration::from_secs(2),
             ..MultiOptions::default()
         },
     )?;
