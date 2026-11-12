@@ -30,7 +30,11 @@ jobs:
       - run: python3 -m unittest discover -s tests -p 'test_selfhost.py'
       - run: cargo test --locked signaling_can_restart_after_an_http_connection_closes
       - run: cargo build --release --locked --bin sfera-net
-      - run: deploy/selfhost/package.sh target/release/sfera-net sfera-server-linux-${{ matrix.arch }}-v1.tar.gz
+      - name: Package server
+        run: |
+          version=unversioned
+          if [[ $GITHUB_REF_TYPE == tag ]]; then version=$GITHUB_REF_NAME; fi
+          deploy/selfhost/package.sh target/release/sfera-net "sfera-server-linux-${{ matrix.arch }}-v1.tar.gz" "$version"
       - uses: actions/upload-artifact@v4
         with:
           name: sfera-server-linux-${{ matrix.arch }}-v1
@@ -47,6 +51,8 @@ jobs:
         with:
           pattern: sfera-server-linux-*
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes --latest sfera-server-linux-*-v1.tar.gz
+      - run: |
+          printf '%s\n' "$GITHUB_REF_NAME" > sfera-upgrade-v1.txt
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes --latest sfera-server-linux-*-v1.tar.gz sfera-upgrade-v1.txt
         env:
           GH_TOKEN: ${{ github.token }}
