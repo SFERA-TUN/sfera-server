@@ -1,18 +1,39 @@
 # SFERA Server
 
-Rust transport, Linux self-hosted installer and native mobile bindings for [SFERA clients](https://github.com/SFERA-TUN/sfera-client).
+Сервер SFERA для своего VPS. VPN-транспорт написан на Rust и передаёт IP-пакеты через WebRTC. В репозитории есть установщик для Linux и нативная библиотека для мобильных клиентов.
+
+[![Rust CI](https://github.com/SFERA-TUN/sfera-server/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SFERA-TUN/sfera-server/actions/workflows/ci.yml)
+
+[Клиенты](https://github.com/SFERA-TUN/sfera-client) · [Релизы сервера](https://github.com/SFERA-TUN/sfera-server/releases/latest) · [Установка](#установка) · [Открытые проблемы](#открытые-проблемы)
+
+## Установка
+
+Нужен отдельный VPS на Debian 12 или 13 либо Ubuntu 24.04 или 26.04. На сервере должны быть systemd, публичный IPv4 и `/dev/net/tun`. Для первой установки освободите TCP-порты 80 и 443, UDP-порт 443 и локальный TCP-порт 7443.
+
+1. Добавьте VPS в клиенте SFERA для macOS и подключитесь по SSH.
+2. Нажмите «Установить SFERA». Клиент скачает пакет для x86_64 или arm64, сверит SHA-256 и передаст архив на сервер.
+3. Создайте отдельного пользователя для каждого устройства и сохраните его профиль JSON.
+
+Добавление и отзыв пользователей перезапускают VPN-службу. Для обновления через клиент нужен релиз с файлом `sfera-upgrade-v1.txt`. SFERA сохраняет пользователей, ключи, IP-адреса и настройки TLS. Сессии прерываются на время перезапуска. Если новая версия не запускается, скрипт обновления восстанавливает предыдущую.
+
+## Открытые проблемы
+
+- **Потери в TUN под нагрузкой.** На стенде с каналом 700 Мбит/с двусторонняя передача дала 203 Мбит/с на отдачу и 128 Мбит/с на загрузку. Прямое соединение на том же стенде дало 657 и 653 Мбит/с. На двух интерфейсах TUN зафиксировали 4 330 отброшенных пакетов.
+- **Резкое сужение канала.** На тесте с переходом с 200 до 60 Мбит/с и обратно текущий контроллер уменьшил число потерь в TUN, но снизил среднюю полезную скорость в обе стороны.
+- **Сравнение с IP-камерой.** Нужна полная трасса WebRTC с автономной камеры. Имеющиеся записи показывают обычный RTP с камеры и WebRTC с веб-камеры через медиасервер.
+- **Проверка у операторов.** Нужен повтор на втором независимом маршруте. Устойчивость к DPI и ТСПУ пока не подтверждена.
+
+[Условия стенда и результаты замеров](docs/adaptive-cbr-release-candidate.md)
+
+## Сборка и тесты
+
+Версию Rust задаёт [rust-toolchain.toml](rust-toolchain.toml).
 
 ```sh
 cargo build --locked --release --bin sfera-net
-cargo test --locked
+CARGO_PROFILE_TEST_OPT_LEVEL=2 cargo test --locked
 cargo test --locked --manifest-path bindings/mobile/Cargo.toml
 python3 -m unittest discover -s tests -p 'test_selfhost.py'
 ```
 
-Tags matching `server-v*` publish Linux x86_64 and aarch64 installation packages. The macOS client downloads the latest server release, verifies the SHA-256 digest supplied by GitHub and stages the package over SSH.
-
-The self-hosted installer expects a dedicated Debian 12/13 or Ubuntu 24.04/26.04 VPS with public IPv4 and `/dev/net/tun`. It uses TCP 80 and 443, UDP 443 and loopback TCP 7443. Export a separate JSON profile for each device. Adding or revoking users restarts the server transport.
-
-The mobile clients pin a server-core commit in `core.ref`. Publish compatible native binding changes before updating that pin.
-
-The macOS client can update an installed v1 server to a newer stable release that contains `sfera-upgrade-v1.txt`. The update replaces the server programs and systemd unit under the installation and user-registry locks. It keeps the existing registry, peer keys, addresses, and TLS configuration. Active VPN sessions reconnect after the transport restart. If the new transport fails its startup check, the updater restores the previous files and restarts the previous version. Retrying after an interrupted upgrade recovers from the saved journal first.
+GitHub Actions собирает и публикует серверные пакеты по тегам `server-v*`. Мобильные клиенты указывают коммит серверного ядра в `core.ref`. При изменении нативного API сначала опубликуйте совместимую версию библиотеки, затем обновите ссылку на коммит в клиенте.
